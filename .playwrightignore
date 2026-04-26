@@ -1,0 +1,13 @@
+# Playwright
+e2e/.auth/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+node_modules/
+.env
+.env.local
+
+# Test artifacts
+*.png
+*.mp4

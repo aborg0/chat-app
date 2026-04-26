@@ -1,0 +1,24 @@
+# VCS and IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# Build outputs
+**/target
+**/.bloop
+**/.metals
+**/.bsp
+!backend/target/universal/stage/**
+
+# Runtime noise
+*.log
+*.tmp
+.env
+.env.*
+
+# Local tooling cache
+.otel
+
+# Docs and local scripts not needed in backend image contexts
+README.md
