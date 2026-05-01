@@ -7,6 +7,9 @@ final case class DbConfig(
   url: String,
   user: String,
   password: String,
+  runtime: String,
+  skunkMaxSessions: Int,
+  skunkIdleTimeMs: Long,
   migrationUser: Option[String],
   migrationPassword: Option[String]
 )
@@ -30,6 +33,7 @@ final case class AppConfig(db: DbConfig, http: HttpConfig, oauth: OAuthConfig)
 extension (db: DbConfig) {
   def effectiveMigrationUser: String     = db.migrationUser.getOrElse(db.user)
   def effectiveMigrationPassword: String = db.migrationPassword.getOrElse(db.password)
+  def useSkunkRuntime: Boolean           = db.runtime.equalsIgnoreCase("skunk")
 }
 
 object AppConfig {
@@ -38,11 +42,14 @@ object AppConfig {
       Config.string("url") ++
         Config.string("user") ++
         Config.string("password") ++
+        Config.string("runtime").withDefault("jdbc") ++
+        Config.int("skunkMaxSessions").withDefault(10) ++
+        Config.long("skunkIdleTimeMs").withDefault(30000L) ++
         Config.string("migrationUser").optional ++
         Config.string("migrationPassword").optional
     ).nested("db").map {
-      case (url, user, password, migUser, migPassword) =>
-        DbConfig(url, user, password, migUser, migPassword)
+      case (url, user, password, runtime, skunkMaxSessions, skunkIdleTimeMs, migUser, migPassword) =>
+        DbConfig(url, user, password, runtime, skunkMaxSessions, skunkIdleTimeMs, migUser, migPassword)
     }
   }
 

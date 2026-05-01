@@ -67,6 +67,34 @@ npm test
 - Grafana: http://localhost:3000
 - Prometheus: http://localhost:9090
 
+## Database runtime mode
+
+Backend runtime database access can be switched between JDBC and Skunk.
+
+- `DB_RUNTIME`: `jdbc` (default) or `skunk`
+- `DB_SKUNK_MAX_SESSIONS`: maximum pooled Skunk sessions (default `10`)
+- `DB_SKUNK_IDLE_TIME_MS`: Skunk idle time setting (default `30000`)
+
+Example (PowerShell):
+
+```powershell
+$env:DB_RUNTIME = "skunk"
+$env:DB_SKUNK_MAX_SESSIONS = "10"
+$env:DB_SKUNK_IDLE_TIME_MS = "30000"
+sbt "backend/run"
+```
+
+Example (bash):
+
+```bash
+DB_RUNTIME=skunk DB_SKUNK_MAX_SESSIONS=10 DB_SKUNK_IDLE_TIME_MS=30000 sbt "backend/run"
+```
+
+Notes:
+
+- Flyway migrations still run over JDBC (separate migration credentials).
+- Integration tests include both `jdbc-fallback` and focused `skunk-runtime` suites.
+
 ## CI workflows
 
 - Build workflow: `.github/workflows/build.yml`

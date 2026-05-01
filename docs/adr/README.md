@@ -13,6 +13,7 @@ This directory records architectural decisions that define the current chat appl
 - `ADR-0007-authentication-and-session-security-controls.md`: session token strength, session expiry, credential enumeration resistance, input validation, error sanitisation, and browser security headers
 - `ADR-0008-database-least-privilege.md`: separate PostgreSQL roles for Flyway migrations (DDL) and runtime application access (DML only)
 - `ADR-0009-oauth2-oidc-social-login.md`: OAuth 2.0 + OIDC for social login with cryptographic identity verification, PKCE, and state-binding
+- `ADR-0010-skunk-runtime-with-jdbc-fallback.md`: adopt Skunk runtime access incrementally behind a runtime switch with JDBC fallback and dual-mode integration coverage
 
 ## Usage
 

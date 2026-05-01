@@ -17,6 +17,8 @@ lazy val zioJsonV    = "0.7.44"
 lazy val zioHttpV    = "3.4.0"
 lazy val zioConfigV  = "4.0.5"
 lazy val zioLoggingV = "2.5.1"
+lazy val zioInteropCatsV = "23.1.0.13"
+lazy val skunkV      = "1.1.0-RC1"
 
 lazy val postgresV   = "42.7.8"
 lazy val flywayV     = "11.14.1"
@@ -64,6 +66,8 @@ lazy val backend = (project in file("backend"))
       "dev.zio" %% "zio-config"             % zioConfigV,
       "dev.zio" %% "zio-config-typesafe"    % zioConfigV,
       "dev.zio" %% "zio-logging-slf4j2"     % zioLoggingV,
+      "dev.zio" %% "zio-interop-cats"       % zioInteropCatsV,
+      "org.tpolecat" %% "skunk-core"        % skunkV,
       "org.postgresql" % "postgresql"       % postgresV,
       "org.flywaydb"  % "flyway-core"       % flywayV,
       "org.flywaydb"  % "flyway-database-postgresql" % flywayV,

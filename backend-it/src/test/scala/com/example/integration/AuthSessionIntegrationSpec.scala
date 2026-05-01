@@ -5,7 +5,7 @@ import com.example.auth.AuthModule
 import com.example.app.ApiRoutes
 import com.example.chapters.ChaptersModule
 import com.example.groups.GroupsModule
-import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations}
+import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations, SkunkSessionPool}
 import com.example.messaging.MessagingModule
 import com.example.sessions.SessionsModule
 import org.testcontainers.containers.PostgreSQLContainer
@@ -23,26 +23,36 @@ object AuthSessionIntegrationSpec extends ZIOSpecDefault {
     routes: Routes[Any, Response]
   )
 
-  private val fixtureLayer: ZLayer[Any, Throwable, Fixture] = ZLayer.scoped {
+  private def fixtureLayer(useSkunk: Boolean): ZLayer[Any, Throwable, Fixture] = ZLayer.scoped {
     for {
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking { val c = new PostgreSQLContainer("postgres:18.3-alpine"); c.start(); c }
       )(c => ZIO.succeed(c.stop()))
       _ <- Migrations.migrate(container.getJdbcUrl, container.getUsername, container.getPassword)
-      db        = new JdbcDatabase(container.getJdbcUrl, container.getUsername, container.getPassword)
-      dbLayer   = ZLayer.succeed[Database](db)
-      sessLayer = dbLayer >>> SessionsModule.layer
-      authLayer = (dbLayer ++ sessLayer) >>> AuthModule.layer
-      msgLayer  = dbLayer >>> MessagingModule.layer
-      chapLayer = dbLayer >>> ChaptersModule.layer
-      grpLayer  = dbLayer >>> GroupsModule.layer
+      db       = new JdbcDatabase(container.getJdbcUrl, container.getUsername, container.getPassword)
+      dbLayer  = ZLayer.succeed[Database](db)
+      skunkLayer =
+        if useSkunk then
+          SkunkSessionPool.layer(container.getJdbcUrl, container.getUsername, container.getPassword, maxSessions = 4)
+        else
+          SkunkSessionPool.disabled
+      dbWithSkunk = dbLayer ++ skunkLayer
+      sessLayer   = dbWithSkunk >>> SessionsModule.layer
+      authLayer   = (dbLayer ++ sessLayer) >>> AuthModule.layer
+      msgLayer    = dbWithSkunk >>> MessagingModule.layer
+      chapLayer   = dbWithSkunk >>> ChaptersModule.layer
+      grpLayer    = dbWithSkunk >>> GroupsModule.layer
       allLayers = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer
       env      <- allLayers.build
     } yield Fixture(ApiRoutes.routes.provideEnvironment(env))
   }
 
+  private val jdbcFixtureLayer  = fixtureLayer(useSkunk = false)
+  private val skunkFixtureLayer = fixtureLayer(useSkunk = true)
+
   override def spec: Spec[TestEnvironment & Scope, Any] = {
     suite("AuthSessionIntegrationSpec")(
+      suite("jdbc-fallback")(
       test("password login + list sessions + logout other devices over HTTP") {
         for {
           fixture <- ZIO.service[Fixture]
@@ -148,7 +158,64 @@ object AuthSessionIntegrationSpec extends ZIOSpecDefault {
           assertTrue(true)
         }
       }
-    ).provideShared(fixtureLayer)
+      ).provideShared(jdbcFixtureLayer),
+      suite("skunk-runtime")(
+        test("password + social sessions work over live skunk pool") {
+          for {
+            fixture <- ZIO.service[Fixture]
+            _ <- withServer(fixture.routes) { port =>
+              for {
+                _ <- postJson[RegisterResponse](port, "/auth/register", RegisterRequest("skunk-auth-user", "Secret123!").toJson)
+                passwordA <- postJson[AuthResponse](port, "/auth/login", LoginRequest("skunk-auth-user", "Secret123!", "skunk-device-a").toJson)
+                _ <- postJson[AuthResponse](port, "/auth/login", LoginRequest("skunk-auth-user", "Secret123!", "skunk-device-b").toJson)
+                socialA <- postJson[AuthResponse](
+                  port,
+                  "/auth/social-login",
+                  SocialLoginRequest("github", "gh_skunk_123", Some("skunk-gh"), "skunk-social-a").toJson
+                )
+                socialB <- postJson[AuthResponse](
+                  port,
+                  "/auth/social-login",
+                  SocialLoginRequest("github", "gh_skunk_123", Some("skunk-gh"), "skunk-social-b").toJson
+                )
+                beforeLogout <- getJson[ActiveSessionsPage](
+                  port,
+                  "/sessions?pageSize=20",
+                  headers = Map("X-Session-Token" -> passwordA.sessionToken)
+                )
+                socialSessions <- getJson[ActiveSessionsPage](
+                  port,
+                  "/sessions?pageSize=20",
+                  headers = Map("X-Session-Token" -> socialA.sessionToken)
+                )
+                _ <- postNoBody(
+                  port,
+                  "/sessions/logout-others",
+                  LogoutOthersRequest(Some("Secret123!")).toJson,
+                  headers = Map("X-Session-Token" -> passwordA.sessionToken)
+                )
+                afterLogout <- getJson[ActiveSessionsPage](
+                  port,
+                  "/sessions?pageSize=20",
+                  headers = Map("X-Session-Token" -> passwordA.sessionToken)
+                )
+                _ <- ZIO.fail(new RuntimeException("Expected social logins to map to same user")).unless(socialA.userId == socialB.userId)
+                _ <- ZIO.fail(new RuntimeException("Expected two password sessions before logout-others")).unless(beforeLogout.items.size == 2)
+                _ <- ZIO.fail(new RuntimeException("Expected two social sessions for social identity user")).unless(socialSessions.items.size == 2)
+                _ <- ZIO.fail(new RuntimeException("Expected only current session after logout-others")).unless(afterLogout.items.size == 1)
+                _ <- ZIO.fail(new RuntimeException("Expected current session token to remain active")).unless(
+                  afterLogout.items.head.sessionToken == passwordA.sessionToken
+                )
+              } yield {
+                assertTrue(true)
+              }
+            }
+          } yield {
+            assertTrue(true)
+          }
+        }
+      ).provideShared(skunkFixtureLayer)
+    )
   }
 
   private def withServer[A](routes: Routes[Any, Response])(effect: Int => Task[A]): Task[A] = {
@@ -228,7 +295,7 @@ object AuthSessionIntegrationSpec extends ZIOSpecDefault {
       if status >= 200 && status < 300 then {
         sb.toString()
       } else {
-        throw new RuntimeException(s"HTTP $status: ${sb.toString()}")
+        throw new RuntimeException(s"$method $path failed with HTTP $status: ${sb.toString()}")
       }
     }
   }

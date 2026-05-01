@@ -51,6 +51,27 @@ Linux/macOS:
 - Grafana: http://localhost:3000
 - Prometheus: http://localhost:9090
 
+## Database runtime
+
+The backend supports two runtime DB modes:
+
+- `jdbc` (default)
+- `skunk`
+
+Set runtime mode with environment variables:
+
+- `DB_RUNTIME` (set to `skunk` to enable Skunk runtime)
+- `DB_SKUNK_MAX_SESSIONS` (default `10`)
+- `DB_SKUNK_IDLE_TIME_MS` (default `30000`)
+
+Example:
+
+```bash
+DB_RUNTIME=skunk DB_SKUNK_MAX_SESSIONS=10 DB_SKUNK_IDLE_TIME_MS=30000 sbt "backend/run"
+```
+
+Flyway migrations remain JDBC-based.
+
 ## Build and test
 
 Run full build and tests that are part of CI:

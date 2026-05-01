@@ -5,7 +5,7 @@ import com.example.auth.AuthModule
 import com.example.app.ApiRoutes
 import com.example.chapters.ChaptersModule
 import com.example.groups.GroupsModule
-import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations}
+import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations, SkunkSessionPool}
 import com.example.messaging.MessagingModule
 import com.example.sessions.SessionsModule
 import org.testcontainers.containers.PostgreSQLContainer
@@ -24,26 +24,36 @@ object MessagingIntegrationSpec extends ZIOSpecDefault {
     routes: Routes[Any, Response]
   )
 
-  private val fixtureLayer: ZLayer[Any, Throwable, Fixture] = ZLayer.scoped {
+  private def fixtureLayer(useSkunk: Boolean): ZLayer[Any, Throwable, Fixture] = ZLayer.scoped {
     for {
       container <- ZIO.acquireRelease(
         ZIO.attemptBlocking { val c = new PostgreSQLContainer("postgres:18.3-alpine"); c.start(); c }
       )(c => ZIO.succeed(c.stop()))
       _ <- Migrations.migrate(container.getJdbcUrl, container.getUsername, container.getPassword)
-      db          = new JdbcDatabase(container.getJdbcUrl, container.getUsername, container.getPassword)
-      dbLayer     = ZLayer.succeed[Database](db)
-      sessLayer   = dbLayer >>> SessionsModule.layer
+      db         = new JdbcDatabase(container.getJdbcUrl, container.getUsername, container.getPassword)
+      dbLayer    = ZLayer.succeed[Database](db)
+      skunkLayer =
+        if useSkunk then
+          SkunkSessionPool.layer(container.getJdbcUrl, container.getUsername, container.getPassword, maxSessions = 4)
+        else
+          SkunkSessionPool.disabled
+      dbWithSkunk = dbLayer ++ skunkLayer
+      sessLayer   = dbWithSkunk >>> SessionsModule.layer
       authLayer   = (dbLayer ++ sessLayer) >>> AuthModule.layer
-      msgLayer    = dbLayer >>> MessagingModule.layer
-      chapLayer   = dbLayer >>> ChaptersModule.layer
-      grpLayer    = dbLayer >>> GroupsModule.layer
+      msgLayer    = dbWithSkunk >>> MessagingModule.layer
+      chapLayer   = dbWithSkunk >>> ChaptersModule.layer
+      grpLayer    = dbWithSkunk >>> GroupsModule.layer
       allLayers   = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer
       env        <- allLayers.build
     } yield Fixture(db, ApiRoutes.routes.provideEnvironment(env))
   }
 
+  private val jdbcFixtureLayer  = fixtureLayer(useSkunk = false)
+  private val skunkFixtureLayer = fixtureLayer(useSkunk = true)
+
   override def spec: Spec[TestEnvironment & Scope, Any] = {
     suite("MessagingIntegrationSpec")(
+      suite("jdbc-fallback")(
       test("message search + deep-link + edit/history + delete over HTTP") {
         for {
           fixture <- ZIO.service[Fixture]
@@ -533,7 +543,87 @@ object MessagingIntegrationSpec extends ZIOSpecDefault {
           assertTrue(true)
         }
       }
-    ).provideShared(fixtureLayer)
+      ).provideShared(jdbcFixtureLayer),
+      suite("skunk-runtime")(
+        test("chapter timeline and message edit work over live skunk pool") {
+          for {
+            fixture <- ZIO.service[Fixture]
+            _ <- withServer(fixture.routes) { port =>
+              for {
+                _ <- postJson[RegisterResponse](port, "/auth/register", RegisterRequest("skunk-runtime-user", "Secret123!").toJson)
+                login <- postJson[AuthResponse](port, "/auth/login", LoginRequest("skunk-runtime-user", "Secret123!", "skunk-runtime-device").toJson)
+                chapter <- postJson[ChapterResponse](
+                  port,
+                  "/chapters",
+                  CreateChapterRequest("Skunk Runtime Chapter", None).toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                firstMessage <- postJson[MessageResponse](
+                  port,
+                  "/messages",
+                  CreateMessageRequest("skunk message 1").toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                secondMessage <- postJson[MessageResponse](
+                  port,
+                  "/messages",
+                  CreateMessageRequest("skunk message 2").toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                _ <- postNoBody(
+                  port,
+                  s"/chapters/${chapter.id}/messages",
+                  AddMessageToChapterRequest(firstMessage.id).toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                _ <- postNoBody(
+                  port,
+                  s"/chapters/${chapter.id}/messages",
+                  AddMessageToChapterRequest(secondMessage.id).toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                edited <- putJson[MessageResponse](
+                  port,
+                  s"/messages/by-id?messageId=${secondMessage.id}",
+                  EditMessageRequest("skunk message 2 edited", expectedVersion = Some(secondMessage.version)).toJson,
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                history <- getJson[List[MessageHistoryEntry]](
+                  port,
+                  s"/messages/history?messageId=${secondMessage.id}",
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                firstPage <- getJson[MessageSearchPage](
+                  port,
+                  s"/chapters/${chapter.id}/messages?pageSize=1",
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                nextCursor <- ZIO
+                  .fromOption(firstPage.nextCursor)
+                  .orElseFail(new RuntimeException("Expected nextCursor on first chapter timeline page"))
+                secondPage <- getJson[MessageSearchPage](
+                  port,
+                  s"/chapters/${chapter.id}/messages?pageSize=1&cursor=$nextCursor",
+                  headers = Map("X-Session-Token" -> login.sessionToken)
+                )
+                _ <- ZIO.fail(new RuntimeException("Expected updated version to be incremented")).unless(edited.version == 2)
+                _ <- ZIO.fail(new RuntimeException("Expected one message history entry after one edit")).unless(history.size == 1)
+                _ <- ZIO.fail(new RuntimeException("Expected chapter timeline to return newest message first")).unless(
+                  firstPage.items.headOption.exists(_.id == secondMessage.id)
+                )
+                _ <- ZIO.fail(new RuntimeException("Expected chapter timeline cursor to page to older message")).unless(
+                  secondPage.items.headOption.exists(_.id == firstMessage.id)
+                )
+              } yield {
+                assertTrue(true)
+              }
+            }
+          } yield {
+            assertTrue(true)
+          }
+        }
+      ).provideShared(skunkFixtureLayer)
+    )
   }
 
   private def makeAdmin(db: JdbcDatabase, userId: Long): Task[Unit] = {
@@ -640,7 +730,7 @@ object MessagingIntegrationSpec extends ZIOSpecDefault {
       if status >= 200 && status < 300 then {
         sb.toString()
       } else {
-        throw new RuntimeException(s"HTTP $status: ${sb.toString()}")
+        throw new RuntimeException(s"$method $path failed with HTTP $status: ${sb.toString()}")
       }
     }
   }
@@ -701,7 +791,7 @@ object MessagingIntegrationSpec extends ZIOSpecDefault {
       if status >= 200 && status < 300 then {
         (sb.toString(), responseHeaders)
       } else {
-        throw new RuntimeException(s"HTTP $status: ${sb.toString()}")
+        throw new RuntimeException(s"$method $path failed with HTTP $status: ${sb.toString()}")
       }
     }
   }
