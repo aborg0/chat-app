@@ -33,3 +33,37 @@ jobs:
         run: |
           sbt "-Dsbt.color=false" "-Dsbt.log.noformat=true" "-Dsbt.supershell=false" \
             "clean;sharedJVM/compile;sharedJS/compile;backend/compile;backendIt/compile;frontend/compile;sharedJVM/test;sharedJS/test;backend/test;frontend/test"
+
+      - name: Report architecture metrics
+        shell: bash
+        run: |
+          set +e
+          sbt "-Dsbt.color=false" "-Dsbt.log.noformat=true" "-Dsbt.supershell=false" \
+            "backend/testOnly com.example.architecture.ArchitectureSpec" | tee architecture-metrics.log
+          test_exit=${PIPESTATUS[0]}
+          set -e
+
+          metrics_line=$(grep 'ARCH_METRICS|' architecture-metrics.log | tail -1 || true)
+
+          {
+            echo "## Architecture Metrics"
+            if [[ -n "$metrics_line" ]]; then
+              boundary=$(echo "$metrics_line" | tr '|' '\n' | grep '^boundaryCrossingRatio=' | cut -d= -f2)
+              cross=$(echo "$metrics_line" | tr '|' '\n' | grep '^crossLayerEdgeCount=' | cut -d= -f2)
+              total=$(echo "$metrics_line" | tr '|' '\n' | grep '^totalEdgeCount=' | cut -d= -f2)
+              max_out=$(echo "$metrics_line" | tr '|' '\n' | grep '^maxOutDegree=' | cut -d= -f2)
+              max_inst=$(echo "$metrics_line" | tr '|' '\n' | grep '^maxInstability=' | cut -d= -f2)
+
+              echo "| Metric | Value |"
+              echo "|---|---:|"
+              echo "| boundaryCrossingRatio | $boundary |"
+              echo "| crossLayerEdgeCount | $cross |"
+              echo "| totalEdgeCount | $total |"
+              echo "| maxOutDegree | $max_out |"
+              echo "| maxInstability | $max_inst |"
+            else
+              echo "Architecture metrics marker was not found in test output."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $test_exit

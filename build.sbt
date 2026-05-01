@@ -70,7 +70,8 @@ lazy val backend = (project in file("backend"))
       "de.mkammerer" % "argon2-jvm"         % argon2V,
       "ch.qos.logback" % "logback-classic"  % logbackV,
       "dev.zio" %% "zio-test"               % zioV % Test,
-      "dev.zio" %% "zio-test-sbt"           % zioV % Test
+      "dev.zio" %% "zio-test-sbt"           % zioV % Test,
+      "com.tngtech.archunit" % "archunit"   % "1.4.2" % Test
     ),
     libraryDependencies += "com.google.cloud.tools" % "jib-core" % "0.27.3",
     jibBaseImage := "eclipse-temurin:21-jre",
