@@ -44,9 +44,11 @@ object ChatView {
     val autoReadBlockedFromMessageIdVar = Var(Option.empty[Long])
     val autoReadInFlightVar = Var(false)
     val isOnlineVar = Var(dom.window.navigator.onLine)
-    val pendingOfflineMessageVar = Var(OfflineMessageStore.loadPending(auth.userId))
+    val chapterDraftsVar = Var(DraftStore.loadAllPendingOfflineDrafts(auth.userId).map(draft => draft.chapterId -> draft).toMap)
+    val typingByChapterVar = Var(Map.empty[Long, List[TypingIndicatorResponse]])
     val cachedMessagesVar = Var(Map.empty[Long, List[MessageResponse]])
     val lastSelectedChapterIdVar = Var(Option.empty[Long])
+    var pendingStopTypingTimer: Option[timers.SetTimeoutHandle] = None
 
     val defaultPageSize = 12
 
@@ -58,6 +60,111 @@ object ChatView {
     def nowEpochMillis(): Long = js.Date.now().toLong
 
     def onlineNow(): Boolean = isOnlineVar.now() && dom.window.navigator.onLine
+
+    def rememberDraft(draft: DraftStore.ChapterDraft): Unit = {
+      chapterDraftsVar.update(_ + (draft.chapterId -> draft))
+      DraftStore.saveDraft(auth.userId, draft)
+    }
+
+    def clearDraft(chapterId: Long, clearRemote: Boolean = true): Unit = {
+      chapterDraftsVar.update(_ - chapterId)
+      DraftStore.clearDraft(auth.userId, chapterId)
+      if clearRemote && onlineNow() then BackendClient.deleteDraft(auth.sessionToken, chapterId).foreach(_ => ())
+    }
+
+    def currentDraft(chapterId: Long): Option[DraftStore.ChapterDraft] =
+      chapterDraftsVar.now().get(chapterId).orElse {
+        DraftStore.loadDraft(auth.userId, chapterId).map { draft =>
+          chapterDraftsVar.update(_ + (chapterId -> draft))
+          draft
+        }
+      }
+
+    def refreshAllDraftsFromBackend(): Unit =
+      if onlineNow() then {
+        BackendClient.getAllDrafts(auth.sessionToken).foreach {
+          case Right(remoteDrafts) =>
+            val pendingOfflineDrafts = chapterDraftsVar.now().filter(_._2.isPendingOffline)
+            val syncedDrafts = remoteDrafts.map { draft =>
+              draft.chapterId -> DraftStore.ChapterDraft.typing(draft.chapterId, draft.content)
+            }.toMap
+            chapterDraftsVar.set(pendingOfflineDrafts ++ syncedDrafts)
+          case Left(_) =>
+            ()
+        }
+      }
+
+    def loadDraftIntoComposer(chapterId: Long): Unit = {
+      currentDraft(chapterId) match {
+        case Some(draft) if draft.isTyping =>
+          newMessageVar.set(draft.content)
+        case Some(draft) if draft.isPendingOffline =>
+          newMessageVar.set("")
+        case _ =>
+          newMessageVar.set("")
+      }
+      if onlineNow() then {
+        BackendClient.getDraft(auth.sessionToken, chapterId).foreach {
+          case Right(Some(remoteDraft)) if !chapterDraftsVar.now().get(chapterId).exists(_.isPendingOffline) =>
+            val syncedDraft = DraftStore.ChapterDraft.typing(remoteDraft.chapterId, remoteDraft.content)
+            rememberDraft(syncedDraft)
+            newMessageVar.set(syncedDraft.content)
+          case Right(None) if !chapterDraftsVar.now().get(chapterId).exists(_.isPendingOffline) =>
+            clearDraft(chapterId, clearRemote = false)
+            newMessageVar.set("")
+          case _ =>
+            ()
+        }
+      }
+    }
+
+    def saveTypingDraftForChapter(chapterId: Long, content: String): Unit = {
+      val existing = chapterDraftsVar.now().get(chapterId)
+      DraftStore.upsertTypingDraft(existing, chapterId, content) match {
+        case Some(draft) =>
+          rememberDraft(draft)
+          if onlineNow() then {
+            BackendClient.saveDraft(auth.sessionToken, chapterId, draft.content).foreach {
+              case Right(savedDraft) =>
+                rememberDraft(DraftStore.ChapterDraft.typing(savedDraft.chapterId, savedDraft.content))
+              case Left(_) =>
+                ()
+            }
+          }
+        case None if !existing.exists(_.isPendingOffline) =>
+          clearDraft(chapterId)
+        case _ =>
+          ()
+      }
+    }
+
+    def connectTypingIndicators(chapterId: Long): Unit = {
+      TypingIndicatorClient.connect(chapterId, auth.sessionToken)
+      TypingIndicatorClient.onTypingUpdate(chapterId) { update =>
+        if update.userId != auth.userId then {
+          typingByChapterVar.update { current =>
+            val existing = current.getOrElse(chapterId, Nil).filterNot(_.userId == update.userId)
+            val next = if update.stoppedTypingAtEpochMillis.isDefined then existing else update :: existing
+            current + (chapterId -> next.sortBy(_.username))
+          }
+        }
+      }
+    }
+
+    def publishTypingState(chapterId: Long, content: String): Unit = {
+      pendingStopTypingTimer.foreach(timers.clearTimeout)
+      if onlineNow() then {
+        if content.trim.nonEmpty then {
+          TypingIndicatorClient.startTyping(chapterId)
+          pendingStopTypingTimer = Some(timers.setTimeout(5000.0) {
+            TypingIndicatorClient.stopTyping(chapterId)
+          })
+        } else {
+          TypingIndicatorClient.stopTyping(chapterId)
+          pendingStopTypingTimer = None
+        }
+      }
+    }
 
     def resolveCurrentChapterIdForOfflineQueue(): Option[Long] = {
       selectedChapterIdVar.now()
@@ -73,25 +180,24 @@ object ChatView {
 
     def saveMessagesToCache(chapterId: Long, messages: List[MessageResponse]): Unit = {
       cachedMessagesVar.update(_ + (chapterId -> messages))
-      OfflineMessageStore.saveCachedMessages(auth.userId, chapterId, messages)
+      DraftStore.saveCachedMessages(auth.userId, chapterId, messages)
     }
 
     def loadMessagesFromCache(chapterId: Long): List[MessageResponse] = {
-      val cached = cachedMessagesVar.now().getOrElse(chapterId, OfflineMessageStore.loadCachedMessages(auth.userId, chapterId))
-      OfflineMessageStore.mergeCachedWithPending(cached, pendingOfflineMessageVar.now(), chapterId, auth.userId)
+      val cached = cachedMessagesVar.now().getOrElse(chapterId, DraftStore.loadCachedMessages(auth.userId, chapterId))
+      DraftStore.mergeCachedWithDraft(cached, currentDraft(chapterId), chapterId, auth.userId)
     }
 
     def queueOfflineMessage(chapterId: Long, content: String): Unit = {
       val trimmed = content.trim
       if trimmed.nonEmpty then {
         val now = nowEpochMillis()
-        OfflineMessageStore.upsertSinglePending(pendingOfflineMessageVar.now(), chapterId, trimmed, now) match {
-          case Right(pending) =>
-            pendingOfflineMessageVar.set(Some(pending))
-            OfflineMessageStore.savePending(auth.userId, pending)
-            val offlineMessage = OfflineMessageStore.toOfflineMessage(pending, auth.userId)
+        DraftStore.upsertPendingOfflineDraft(chapterDraftsVar.now().get(chapterId), chapterId, trimmed, now) match {
+          case Right(draft) =>
+            rememberDraft(draft)
+            val offlineMessage = DraftStore.toOfflineMessage(draft, auth.userId)
             messagesVar.update { current =>
-              val withoutPrev = current.filterNot(_.id == pending.tempId)
+              val withoutPrev = current.filterNot(_.id == offlineMessage.id)
               offlineMessage :: withoutPrev
             }
             saveMessagesToCache(chapterId, messagesVar.now())
@@ -102,20 +208,16 @@ object ChatView {
       }
     }
 
-    def clearPendingOfflineMessage(): Unit = {
-      pendingOfflineMessageVar.set(None)
-      OfflineMessageStore.clearPending(auth.userId)
-    }
-
     def syncPendingOfflineMessage(chapterId: Long): Unit = {
       if !onlineNow() then return
-      pendingOfflineMessageVar.now() match {
-        case Some(pending) if pending.chapterId == chapterId =>
-          BackendClient.createMessage(auth.sessionToken, pending.content, Some(pending.lastEditedAtEpochMillis)).foreach {
+      chapterDraftsVar.now().get(chapterId) match {
+        case Some(draft) if draft.isPendingOffline =>
+          val pending = draft.pendingOffline.get
+          BackendClient.createMessage(auth.sessionToken, draft.content, Some(pending.lastEditedAtEpochMillis)).foreach {
             case Right(created) =>
               BackendClient.addMessageToChapter(auth.sessionToken, chapterId, created.id).foreach {
                 case Right(_) =>
-                  clearPendingOfflineMessage()
+                  clearDraft(chapterId)
                   messagesVar.update { current =>
                     created :: current.filterNot(_.id == pending.tempId)
                   }
@@ -136,7 +238,11 @@ object ChatView {
 
     def setOnlineStatus(online: Boolean): Unit = {
       isOnlineVar.set(online)
-      if online then selectedChapterIdVar.now().foreach(syncPendingOfflineMessage)
+      if online then {
+        refreshAllDraftsFromBackend()
+        chapterDraftsVar.now().keys.foreach(syncPendingOfflineMessage)
+        selectedChapterIdVar.now().foreach(connectTypingIndicators)
+      }
     }
 
     def recomputeFirstUnreadDividerForSelectedChapter(): Unit = {
@@ -413,6 +519,10 @@ object ChatView {
         val clientEditedAt = Some(nowEpochMillis())
         BackendClient.createMessage(auth.sessionToken, content, clientEditedAt).foreach {
           case Right(created) =>
+            selectedChapterIdVar.now().foreach { chapterId =>
+              clearDraft(chapterId, clearRemote = true)
+              TypingIndicatorClient.stopTyping(chapterId)
+            }
             newMessageVar.set("")
             selectedMessageVar.set(Some(created))
             selectedMessageIdVar.set(created.id.toString)
@@ -451,6 +561,7 @@ object ChatView {
               fallbackChapterId match {
                 case Some(chapterId) =>
                   queueOfflineMessage(chapterId, content)
+                  TypingIndicatorClient.stopTyping(chapterId)
                   newMessageVar.set("")
                 case None =>
                   statusVar.set(s"Create failed: $error")
@@ -502,12 +613,15 @@ object ChatView {
       (selectedMessageVar.now(), editContentVar.now().trim) match {
         case (Some(message), updated) if updated.nonEmpty =>
           if message.id < 0 then {
-            pendingOfflineMessageVar.now() match {
-              case Some(pending) if pending.tempId == message.id =>
-                val updatedPending = pending.copy(content = updated, lastEditedAtEpochMillis = nowEpochMillis())
-                pendingOfflineMessageVar.set(Some(updatedPending))
-                OfflineMessageStore.savePending(auth.userId, updatedPending)
-                val offlineMessage = OfflineMessageStore.toOfflineMessage(updatedPending, auth.userId)
+            selectedChapterIdVar.now().flatMap(currentDraft) match {
+              case Some(draft) if draft.isPendingOffline && draft.pendingOffline.exists(_.tempId == message.id) =>
+                val pending = draft.pendingOffline.get
+                val updatedDraft = draft.copy(
+                  content = updated,
+                  pendingOffline = Some(pending.copy(lastEditedAtEpochMillis = nowEpochMillis()))
+                )
+                rememberDraft(updatedDraft)
+                val offlineMessage = DraftStore.toOfflineMessage(updatedDraft, auth.userId)
                 messagesVar.update(_.map(m => if m.id == message.id then offlineMessage else m))
                 selectedMessageVar.set(Some(offlineMessage))
                 editContentVar.set(updated)
@@ -606,6 +720,11 @@ object ChatView {
     }
 
     def selectChapter(chapterId: Long): Unit = {
+      selectedChapterIdVar.now().foreach { previousChapterId =>
+        saveTypingDraftForChapter(previousChapterId, newMessageVar.now())
+        TypingIndicatorClient.stopTyping(previousChapterId)
+        TypingIndicatorClient.disconnect(previousChapterId)
+      }
       selectedChapterIdVar.set(Some(chapterId))
       lastSelectedChapterIdVar.set(Some(chapterId))
       searchVar.set("")
@@ -619,6 +738,7 @@ object ChatView {
       autoReadMarkedIdsVar.set(Set.empty)
       autoReadBlockedFromMessageIdVar.set(None)
       autoReadInFlightVar.set(false)
+      loadDraftIntoComposer(chapterId)
       if !onlineNow() then {
         val cached = loadMessagesFromCache(chapterId)
         messagesVar.set(cached)
@@ -629,6 +749,7 @@ object ChatView {
         statusVar.set(if cached.nonEmpty then "Offline: loaded cached messages" else "Offline: no cached messages for this chapter")
         return
       }
+      connectTypingIndicators(chapterId)
       // Load unread count first so we can scroll to the first unread message
       BackendClient.chapterUnreadCount(auth.sessionToken, chapterId).foreach {
         case Right(unread) =>
@@ -773,6 +894,18 @@ object ChatView {
             }
           )
         ),
+        child <-- Signal.combine(selectedChapterIdVar.signal, typingByChapterVar.signal).map {
+          case (Some(chapterId), typingByChapter) =>
+            val activeTypers = typingByChapter.getOrElse(chapterId, Nil)
+            if activeTypers.nonEmpty then {
+              div(
+                cls := "typing-indicator",
+                s"${activeTypers.map(_.username).mkString(", ")} typing..."
+              )
+            } else emptyNode
+          case _ =>
+            emptyNode
+        },
         div(
           cls := "composer-row",
           textArea(
@@ -781,7 +914,13 @@ object ChatView {
             placeholder := "Write a message, then Enter Send",
             controlled(
               value <-- newMessageVar.signal,
-              onInput.mapToValue --> newMessageVar.writer
+              onInput.mapToValue --> Observer[String] { value =>
+                newMessageVar.set(value)
+                selectedChapterIdVar.now().foreach { chapterId =>
+                  saveTypingDraftForChapter(chapterId, value)
+                  publishTypingState(chapterId, value)
+                }
+              }
             )
           ),
           div(

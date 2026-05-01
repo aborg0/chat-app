@@ -7,6 +7,8 @@ import com.example.chapters.ChaptersModule
 import com.example.groups.GroupsModule
 import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations, SkunkSessionPool}
 import com.example.messaging.MessagingModule
+import com.example.messaging.DraftsModule
+import com.example.messaging.TypingModule
 import com.example.sessions.SessionsModule
 import org.testcontainers.containers.PostgreSQLContainer
 import zio.*
@@ -43,7 +45,7 @@ object MessagingIntegrationSpec extends ZIOSpecDefault {
       msgLayer    = dbWithSkunk >>> MessagingModule.layer
       chapLayer   = dbWithSkunk >>> ChaptersModule.layer
       grpLayer    = dbWithSkunk >>> GroupsModule.layer
-      allLayers   = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer
+      allLayers   = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer ++ DraftsModule.live ++ TypingModule.live ++ dbLayer
       env        <- allLayers.build
     } yield Fixture(db, ApiRoutes.routes.provideEnvironment(env))
   }

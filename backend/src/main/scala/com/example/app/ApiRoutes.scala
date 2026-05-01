@@ -5,10 +5,14 @@ import com.example.auth.AuthModule.AuthService
 import com.example.chapters.ChaptersModule.ChaptersService
 import com.example.groups.GroupsModule.GroupsService
 import com.example.messaging.MessagingModule.MessagingService
+import com.example.messaging.DraftsModule.DraftsService
+import com.example.messaging.TypingModule.TypingService
 import com.example.sessions.SessionsModule.SessionsService
+import com.example.infrastructure.db.Database
 import zio.*
 import zio.http.*
 import zio.json.*
+import zio.http.ChannelEvent.{Read, Unregistered}
 
 import java.security.SecureRandom
 
@@ -20,7 +24,7 @@ object ApiRoutes {
   private val maxRequestBodyChars = 100000
   private val random = new SecureRandom()
 
-  type AppEnv = AuthService & SessionsService & MessagingService & ChaptersService & GroupsService
+  type AppEnv = AuthService & SessionsService & MessagingService & ChaptersService & GroupsService & DraftsService & TypingService & Database
 
   def routes: Routes[AppEnv, Response] = {
     val baseRoutes = Routes(
@@ -153,6 +157,23 @@ object ApiRoutes {
       // ---- Share links (public, no auth required) ----
       Method.GET / "share" / string("token") -> handler { (token: String, req: Request) =>
         withTraceparent(req)(asHttpError(handleResolveShareLink(token)))
+      },
+      // ---- Drafts ----
+      Method.GET / "user" / "drafts" -> handler { (req: Request) =>
+        withTraceparent(req)(asHttpError(handleGetAllDrafts(req)))
+      },
+      Method.GET / "chapters" / long("id") / "draft" -> handler { (id: Long, req: Request) =>
+        withTraceparent(req)(asHttpError(handleGetDraft(id, req)))
+      },
+      Method.PUT / "chapters" / long("id") / "draft" -> handler { (id: Long, req: Request) =>
+        withTraceparent(req)(asHttpError(handleSaveDraft(id, req)))
+      },
+      Method.DELETE / "chapters" / long("id") / "draft" -> handler { (id: Long, req: Request) =>
+        withTraceparent(req)(asHttpError(handleDeleteDraft(id, req)))
+      },
+      // ---- Typing Indicators (WebSocket) ----
+      Method.GET / "typing" / "subscribe" -> handler { (req: Request) =>
+        withTraceparent(req)(handleTypingSubscribe(req))
       },
       Method.GET / "health" -> handler { (req: Request) =>
         withTraceparent(req)(ZIO.succeed(Response.text("OK")))
@@ -824,4 +845,93 @@ object ApiRoutes {
       userId   <- readAuthenticatedUserId(req)
       groupIds <- ZIO.serviceWithZIO[GroupsService](_.listChapterGroupAccess(userId, chapterId))
     } yield Response.json(ChapterGroupAccessResponse(groupIds).toJson)
+
+  // ---- Draft handlers ----
+
+  private def handleGetAllDrafts(req: Request): ZIO[SessionsService & DraftsService, Throwable, Response] =
+    for {
+      userId <- readAuthenticatedUserId(req)
+      drafts <- ZIO.serviceWithZIO[DraftsService](_.getAllDrafts(userId))
+    } yield Response.json(drafts.toJson)
+
+  private def handleGetDraft(chapterId: Long, req: Request): ZIO[SessionsService & ChaptersService & DraftsService, Throwable, Response] =
+    for {
+      userId <- readAuthenticatedUserId(req)
+      _ <- ZIO.serviceWithZIO[ChaptersService](_.getChapterDetail(userId, chapterId))
+      draft  <- ZIO.serviceWithZIO[DraftsService](_.getDraft(userId, chapterId))
+    } yield Response.json(draft.toJson)
+
+  private def handleSaveDraft(chapterId: Long, req: Request): ZIO[SessionsService & ChaptersService & DraftsService, Throwable, Response] =
+    for {
+      userId  <- readAuthenticatedUserId(req)
+      _ <- ZIO.serviceWithZIO[ChaptersService](_.getChapterDetail(userId, chapterId))
+      payload <- decodeBody[SaveDraftRequest](req)
+      draft   <- ZIO.serviceWithZIO[DraftsService](_.saveDraft(userId, chapterId, payload.content))
+    } yield Response.json(draft.toJson)
+
+  private def handleDeleteDraft(chapterId: Long, req: Request): ZIO[SessionsService & ChaptersService & DraftsService, Throwable, Response] =
+    for {
+      userId <- readAuthenticatedUserId(req)
+      _ <- ZIO.serviceWithZIO[ChaptersService](_.getChapterDetail(userId, chapterId))
+      _      <- ZIO.serviceWithZIO[DraftsService](_.deleteDraft(userId, chapterId))
+    } yield Response.ok
+
+  // ---- Typing indicator handlers ----
+
+  private def resolveUsernameByUserId(userId: Long): ZIO[Database, Throwable, String] =
+    ZIO.serviceWithZIO[Database] { db =>
+      ZIO.attempt {
+        db.withConnection { connection =>
+          val statement = connection.prepareStatement("SELECT username FROM users WHERE id = ?")
+          try {
+            statement.setLong(1, userId)
+            val rs = statement.executeQuery()
+            if rs.next() then {
+              val username = rs.getString("username")
+              rs.close()
+              username
+            } else {
+              rs.close()
+              s"user-$userId"
+            }
+          } finally {
+            statement.close()
+          }
+        }
+      }.flatten
+    }
+
+  private def handleTypingSubscribe(req: Request): ZIO[SessionsService & TypingService & Database, Response, Response] =
+    ZIO
+      .fromOption(optionalLongQuery(req, "chapterId"))
+      .mapError(_ => Response.badRequest("chapterId query parameter is required"))
+      .flatMap { chapterId =>
+        readAuthenticatedUserId(req)
+          .mapError(_ => Response.unauthorized("Invalid session token"))
+          .flatMap { userId =>
+            ZIO.scoped {
+              Handler
+                .webSocket { channel =>
+                  for {
+                    username <- resolveUsernameByUserId(userId)
+                    _ <- ZIO.serviceWithZIO[TypingService](
+                      _.subscribeToTypingEvents(chapterId)
+                        .runForeach(event => channel.send(Read(WebSocketFrame.text(event.toJson))))
+                    ).forkScoped
+                    _ <- channel.receiveAll {
+                      case Read(WebSocketFrame.Text(text)) if text.toLowerCase.contains("stopped") =>
+                        ZIO.serviceWithZIO[TypingService](_.stopTyping(userId, chapterId))
+                      case Read(_: WebSocketFrame.Text) =>
+                        ZIO.serviceWithZIO[TypingService](_.startTyping(userId, username, chapterId))
+                      case Unregistered =>
+                        ZIO.serviceWithZIO[TypingService](_.stopTyping(userId, chapterId))
+                      case _ =>
+                        ZIO.unit
+                    }
+                  } yield ()
+                }
+                .toResponse
+            }
+          }
+      }
 }

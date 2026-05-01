@@ -6,6 +6,8 @@ import com.example.groups.GroupsModule
 import com.example.infrastructure.db.{Database, Migrations, SkunkSessionPool}
 import com.example.messaging.MessagingModule
 import com.example.sessions.SessionsModule
+import com.example.messaging.DraftsModule
+import com.example.messaging.TypingModule
 import zio.*
 import zio.http.Server
 
@@ -36,7 +38,9 @@ object Main extends ZIOAppDefault {
           AuthModule.layer,
           MessagingModule.layer,
           ChaptersModule.layer,
-          GroupsModule.layer
+          GroupsModule.layer,
+          DraftsModule.live,
+          TypingModule.live
         )
     } yield ()
   }

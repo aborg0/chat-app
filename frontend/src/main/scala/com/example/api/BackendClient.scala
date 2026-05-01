@@ -293,6 +293,37 @@ object BackendClient {
     getJson[ShareLinkTargetResponse](s"/share/$token")
   }
 
+  // ---- Drafts ----
+
+  def getAllDrafts(sessionToken: String): Future[Either[String, List[DraftResponse]]] = {
+    getJson[List[DraftResponse]](
+      "/user/drafts",
+      headers = Map("X-Session-Token" -> sessionToken)
+    )
+  }
+
+  def getDraft(sessionToken: String, chapterId: Long): Future[Either[String, Option[DraftResponse]]] = {
+    getJson[Option[DraftResponse]](
+      s"/chapters/$chapterId/draft",
+      headers = Map("X-Session-Token" -> sessionToken)
+    )
+  }
+
+  def saveDraft(sessionToken: String, chapterId: Long, content: String): Future[Either[String, DraftResponse]] = {
+    putJson[SaveDraftRequest, DraftResponse](
+      s"/chapters/$chapterId/draft",
+      SaveDraftRequest(content),
+      headers = Map("X-Session-Token" -> sessionToken)
+    )
+  }
+
+  def deleteDraft(sessionToken: String, chapterId: Long): Future[Either[String, Unit]] = {
+    deleteNoResponse(
+      s"/chapters/$chapterId/draft",
+      headers = Map("X-Session-Token" -> sessionToken)
+    )
+  }
+
   // ---- Groups ----
 
   def createGroup(sessionToken: String, name: String): Future[Either[String, GroupResponse]] = {

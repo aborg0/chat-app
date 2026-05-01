@@ -265,3 +265,44 @@ object ChapterGroupAccessResponse {
   given JsonEncoder[ChapterGroupAccessResponse] = DeriveJsonEncoder.gen[ChapterGroupAccessResponse]
   given JsonDecoder[ChapterGroupAccessResponse] = DeriveJsonDecoder.gen[ChapterGroupAccessResponse]
 }
+
+// ---- Drafts ----
+
+final case class DraftResponse(
+  chapterId: Long,
+  userId: Long,
+  content: String,
+  lastModifiedAtEpochMillis: Long
+)
+object DraftResponse {
+  given JsonEncoder[DraftResponse] = DeriveJsonEncoder.gen[DraftResponse]
+  given JsonDecoder[DraftResponse] = DeriveJsonDecoder.gen[DraftResponse]
+}
+
+final case class SaveDraftRequest(content: String)
+object SaveDraftRequest {
+  given JsonEncoder[SaveDraftRequest] = DeriveJsonEncoder.gen[SaveDraftRequest]
+  given JsonDecoder[SaveDraftRequest] = DeriveJsonDecoder.gen[SaveDraftRequest]
+}
+
+// ---- Typing Indicators ----
+
+final case class TypingIndicatorResponse(
+  userId: Long,
+  username: String,
+  chapterId: Long,
+  stoppedTypingAtEpochMillis: Option[Long]
+)
+object TypingIndicatorResponse {
+  given JsonEncoder[TypingIndicatorResponse] = DeriveJsonEncoder.gen[TypingIndicatorResponse]
+  given JsonDecoder[TypingIndicatorResponse] = DeriveJsonDecoder.gen[TypingIndicatorResponse]
+}
+
+sealed trait TypingEventMessage
+object TypingEventMessage {
+  final case object Started extends TypingEventMessage
+  final case object Stopped extends TypingEventMessage
+
+  given JsonEncoder[TypingEventMessage] = DeriveJsonEncoder.gen[TypingEventMessage]
+  given JsonDecoder[TypingEventMessage] = DeriveJsonDecoder.gen[TypingEventMessage]
+}
