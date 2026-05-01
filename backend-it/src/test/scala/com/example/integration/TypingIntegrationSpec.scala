@@ -1,10 +1,25 @@
 package com.example.integration
 
 import com.example.messaging.TypingModule
+import com.example.infrastructure.db.{Database, JdbcDatabase, Migrations, SkunkSessionPool}
+import org.testcontainers.containers.PostgreSQLContainer
 import zio.*
 import zio.test.*
 
 object TypingIntegrationSpec extends ZIOSpecDefault {
+
+  private def fixtureLayer: ZLayer[Any, Throwable, TypingModule.TypingService] = ZLayer.scoped {
+    for {
+      container <- ZIO.acquireRelease(
+        ZIO.attemptBlocking { val c = new PostgreSQLContainer("postgres:18.3-alpine"); c.start(); c }
+      )(c => ZIO.succeed(c.stop()))
+      _ <- Migrations.migrate(container.getJdbcUrl, container.getUsername, container.getPassword)
+      db = new JdbcDatabase(container.getJdbcUrl, container.getUsername, container.getPassword)
+      dbLayer = ZLayer.succeed[Database](db)
+      env <- (dbLayer >>> TypingModule.live).build
+      service = env.get[TypingModule.TypingService]
+    } yield service
+  }
 
   override def spec: Spec[TestEnvironment & Scope, Any] = {
     suite("TypingIntegrationSpec")(
@@ -44,6 +59,6 @@ object TypingIntegrationSpec extends ZIOSpecDefault {
           assertTrue(true)
         }
       }
-    ).provideShared(TypingModule.live)
+    ).provideShared(fixtureLayer)
   }
 }

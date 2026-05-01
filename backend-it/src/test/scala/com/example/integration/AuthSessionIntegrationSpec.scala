@@ -44,7 +44,7 @@ object AuthSessionIntegrationSpec extends ZIOSpecDefault {
       msgLayer    = dbWithSkunk >>> MessagingModule.layer
       chapLayer   = dbWithSkunk >>> ChaptersModule.layer
       grpLayer    = dbWithSkunk >>> GroupsModule.layer
-      allLayers = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer ++ DraftsModule.live ++ TypingModule.live ++ dbLayer
+      allLayers = sessLayer ++ authLayer ++ msgLayer ++ chapLayer ++ grpLayer ++ DraftsModule.live ++ (dbLayer >>> TypingModule.live)
       env      <- allLayers.build
     } yield Fixture(ApiRoutes.routes.provideEnvironment(env))
   }

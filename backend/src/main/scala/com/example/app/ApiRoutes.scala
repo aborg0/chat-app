@@ -8,7 +8,6 @@ import com.example.messaging.MessagingModule.MessagingService
 import com.example.messaging.DraftsModule.DraftsService
 import com.example.messaging.TypingModule.TypingService
 import com.example.sessions.SessionsModule.SessionsService
-import com.example.infrastructure.db.Database
 import zio.*
 import zio.http.*
 import zio.json.*
@@ -24,7 +23,7 @@ object ApiRoutes {
   private val maxRequestBodyChars = 100000
   private val random = new SecureRandom()
 
-  type AppEnv = AuthService & SessionsService & MessagingService & ChaptersService & GroupsService & DraftsService & TypingService & Database
+  type AppEnv = AuthService & SessionsService & MessagingService & ChaptersService & GroupsService & DraftsService & TypingService
 
   def routes: Routes[AppEnv, Response] = {
     val baseRoutes = Routes(
@@ -878,30 +877,7 @@ object ApiRoutes {
 
   // ---- Typing indicator handlers ----
 
-  private def resolveUsernameByUserId(userId: Long): ZIO[Database, Throwable, String] =
-    ZIO.serviceWithZIO[Database] { db =>
-      ZIO.attempt {
-        db.withConnection { connection =>
-          val statement = connection.prepareStatement("SELECT username FROM users WHERE id = ?")
-          try {
-            statement.setLong(1, userId)
-            val rs = statement.executeQuery()
-            if rs.next() then {
-              val username = rs.getString("username")
-              rs.close()
-              username
-            } else {
-              rs.close()
-              s"user-$userId"
-            }
-          } finally {
-            statement.close()
-          }
-        }
-      }.flatten
-    }
-
-  private def handleTypingSubscribe(req: Request): ZIO[SessionsService & TypingService & Database, Response, Response] =
+  private def handleTypingSubscribe(req: Request): ZIO[SessionsService & TypingService, Response, Response] =
     ZIO
       .fromOption(optionalLongQuery(req, "chapterId"))
       .mapError(_ => Response.badRequest("chapterId query parameter is required"))
@@ -913,7 +889,7 @@ object ApiRoutes {
               Handler
                 .webSocket { channel =>
                   for {
-                    username <- resolveUsernameByUserId(userId)
+                    username <- ZIO.serviceWithZIO[TypingService](_.resolveUsernameByUserId(userId))
                     _ <- ZIO.serviceWithZIO[TypingService](
                       _.subscribeToTypingEvents(chapterId)
                         .runForeach(event => channel.send(Read(WebSocketFrame.text(event.toJson))))

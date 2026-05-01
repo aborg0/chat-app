@@ -1,6 +1,7 @@
 package com.example.messaging
 
 import com.example.api.TypingIndicatorResponse
+import com.example.infrastructure.db.Database
 import zio.*
 import zio.stream.*
 
@@ -19,11 +20,13 @@ object TypingModule {
     def stopTyping(userId: Long, chapterId: Long): Task[Unit]
     def getTypingUsers(chapterId: Long): Task[List[TypingIndicatorResponse]]
     def subscribeToTypingEvents(chapterId: Long): ZStream[Any, Nothing, TypingIndicatorResponse]
+     def resolveUsernameByUserId(userId: Long): Task[String]
   }
 
   final class LiveTypingService(
     stateRef: Ref[TypingState],
-    subscriptions: Ref[Map[Long, Chunk[Hub[TypingIndicatorResponse]]]]
+     subscriptions: Ref[Map[Long, Chunk[Hub[TypingIndicatorResponse]]]],
+     db: Database
   ) extends TypingService {
 
     def startTyping(userId: Long, username: String, chapterId: Long): Task[Unit] =
@@ -74,14 +77,36 @@ object TypingModule {
       subscriptions.get.flatMap { current =>
         ZIO.foreachDiscard(current.getOrElse(chapterId, Chunk.empty))(hub => hub.publish(event).unit)
       }
+
+    def resolveUsernameByUserId(userId: Long): Task[String] =
+      ZIO.attempt {
+        db.withConnection { connection =>
+          val statement = connection.prepareStatement("SELECT username FROM users WHERE id = ?")
+          try {
+            statement.setLong(1, userId)
+            val rs = statement.executeQuery()
+            if rs.next() then {
+              val username = rs.getString("username")
+              rs.close()
+              username
+            } else {
+              rs.close()
+              s"user-$userId"
+            }
+          } finally {
+            statement.close()
+          }
+        }
+      }.flatten
   }
 
-  val live: ULayer[TypingService] =
+  def live: ZLayer[Database, Nothing, TypingService] =
     ZLayer {
       for {
+        db <- ZIO.service[Database]
         stateRef <- Ref.make(TypingState(Map.empty))
         subscriptions <- Ref.make(Map.empty[Long, Chunk[Hub[TypingIndicatorResponse]]])
-        service = new LiveTypingService(stateRef, subscriptions)
+        service = new LiveTypingService(stateRef, subscriptions, db)
         _ <- cleanupLoop(stateRef).forkDaemon
       } yield service
     }
