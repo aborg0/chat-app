@@ -16,6 +16,8 @@ object ApiRoutes {
 
   private val traceparentHeaderName = "traceparent"
   private val traceparentRegex = "(?i)^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$".r
+  private val sessionTokenRegex = "^[A-Za-z0-9_-]{20,200}$".r
+  private val maxRequestBodyChars = 100000
   private val random = new SecureRandom()
 
   type AppEnv = AuthService & SessionsService & MessagingService & ChaptersService & GroupsService
@@ -163,8 +165,8 @@ object ApiRoutes {
   private def withTraceparent[R](req: Request)(effect: ZIO[R, Response, Response]): ZIO[R, Response, Response] = {
     val traceparent = resolveTraceparent(req)
     effect
-      .map(response => attachTraceparent(response, traceparent))
-      .mapError(response => attachTraceparent(response, traceparent))
+      .map(response => withSecurityHeaders(attachTraceparent(response, traceparent)))
+      .mapError(response => withSecurityHeaders(attachTraceparent(response, traceparent)))
   }
 
   private def resolveTraceparent(req: Request): String = {
@@ -198,6 +200,16 @@ object ApiRoutes {
 
   private def attachTraceparent(response: Response, traceparent: String): Response =
     response.addHeaders(Headers(Header.Custom(traceparentHeaderName, traceparent)))
+
+  private def withSecurityHeaders(response: Response): Response = {
+    response.addHeaders(
+      Headers(
+        Header.Custom("x-content-type-options", "nosniff"),
+        Header.Custom("x-frame-options", "DENY"),
+        Header.Custom("cache-control", "no-store")
+      )
+    )
+  }
 
   private val openApiJson: String =
     """{
@@ -386,14 +398,30 @@ object ApiRoutes {
       val message = Option(error.getMessage).getOrElse("Request failed")
       if message.contains("Missing header 'X-Session-Token'") || message.contains("Invalid or inactive session token") then {
         Response.unauthorized(message)
+      } else if message.contains("Invalid credentials") || message.contains("Re-authentication failed") then {
+        Response.unauthorized("Invalid credentials")
       } else if message.contains("Admin rights are required") || message.contains("Not allowed") then {
         Response.forbidden(message)
       } else if message.toLowerCase.contains("optimistic concurrency conflict") then {
         Response(status = Status.Conflict, body = Body.fromString(message))
-      } else {
+      } else if message.contains("Unsupported social login provider") then {
+        Response(status = Status.BadRequest, body = Body.fromString(message))
+      } else if isSafeClientMessage(message) then {
         Response.badRequest(message)
+      } else {
+        Response(status = Status.InternalServerError, body = Body.fromString("Request failed"))
       }
     }
+  }
+
+  private def isSafeClientMessage(message: String): Boolean = {
+    val lower = message.toLowerCase
+    lower.contains("missing") ||
+    lower.contains("invalid") ||
+    lower.contains("must be") ||
+    lower.contains("cannot") ||
+    lower.contains("not found") ||
+    lower.contains("already exists")
   }
 
   private def handleRegister(req: Request): ZIO[AuthService, Throwable, Response] = {
@@ -560,6 +588,7 @@ object ApiRoutes {
   private def decodeBody[A: JsonDecoder](req: Request): Task[A] =
     for {
       body   <- req.body.asString
+      _      <- ZIO.fail(new RuntimeException("Request body too large")).when(body.length > maxRequestBodyChars)
       parsed <- ZIO.fromEither(body.fromJson[A]).mapError(err => new RuntimeException(err))
     } yield parsed
 
@@ -589,6 +618,8 @@ object ApiRoutes {
     val headerName = "X-Session-Token"
     ZIO.fromOption(req.headers.get(headerName))
       .orElseFail(new RuntimeException(s"Missing header '$headerName'"))
+      .map(_.trim)
+      .filterOrFail(token => sessionTokenRegex.matches(token))(new RuntimeException("Invalid or inactive session token"))
   }
 
   // ---- Chapter handlers ----

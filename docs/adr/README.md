@@ -10,6 +10,9 @@ This directory records architectural decisions that define the current chat appl
 - `ADR-0004-bounded-offline-message-support.md`: offline cache plus a single pending offline message per user
 - `ADR-0005-optimistic-concurrency-for-message-edits.md`: message versioning and conflict detection for edits
 - `ADR-0006-source-level-architecture-fitness-functions.md`: source-level architecture checks due ArchUnit and Java 25 incompatibility
+- `ADR-0007-authentication-and-session-security-controls.md`: session token strength, session expiry, credential enumeration resistance, input validation, error sanitisation, and browser security headers
+- `ADR-0008-database-least-privilege.md`: separate PostgreSQL roles for Flyway migrations (DDL) and runtime application access (DML only)
+- `ADR-0009-oauth2-oidc-social-login.md`: OAuth 2.0 + OIDC for social login with cryptographic identity verification, PKCE, and state-binding
 
 ## Usage
 

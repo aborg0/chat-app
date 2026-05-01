@@ -8,6 +8,8 @@ import java.util.Base64
 
 object ChaptersModule {
 
+  private val shareLinkTokenPattern = "^[A-Za-z0-9_-]{20,100}$".r
+
   final case class Chapter(
     id: Long,
     ownerUserId: Long,
@@ -61,6 +63,7 @@ object ChaptersModule {
   final class LiveChaptersService(db: Database) extends ChaptersService {
 
     private val rng = new SecureRandom()
+    private val shareLinkTtlDays = 7
 
     private def generateToken(): String = {
       val bytes = new Array[Byte](24)
@@ -696,7 +699,10 @@ object ChaptersModule {
 
           val token = generateToken()
           val stmt = connection.prepareStatement(
-            "INSERT INTO share_links(token, owner_user_id, chapter_id, message_id) VALUES (?, ?, ?, ?)"
+            """
+              |INSERT INTO share_links(token, owner_user_id, chapter_id, message_id, expires_at)
+              |VALUES (?, ?, ?, ?, NOW() + (? * INTERVAL '1 day'))
+              |""".stripMargin
           )
           try {
             stmt.setString(1, token)
@@ -709,6 +715,7 @@ object ChaptersModule {
               case Some(mid) => stmt.setLong(4, mid)
               case None      => stmt.setNull(4, java.sql.Types.BIGINT)
             }
+            stmt.setInt(5, shareLinkTtlDays)
             stmt.executeUpdate()
             token
           } finally {
@@ -718,25 +725,41 @@ object ChaptersModule {
     }
 
     override def resolveShareLink(token: String): Task[ShareLinkTarget] = {
-      db.withConnection { connection =>
-        val stmt = connection.prepareStatement(
-          "SELECT chapter_id, message_id FROM share_links WHERE token = ?"
-        )
-        try {
-          stmt.setString(1, token)
-          val rs = stmt.executeQuery()
-          if !rs.next() then throw new RuntimeException("Share link not found or expired")
-          val chapterId = rs.getLong("chapter_id")
-          val chapIdOpt = if rs.wasNull() then None else Some(chapterId)
-          val messageId = rs.getLong("message_id")
-          val msgIdOpt = if rs.wasNull() then None else Some(messageId)
-          rs.close()
-          val targetType = if chapIdOpt.isDefined then "chapter" else "message"
-          ShareLinkTarget(targetType, chapIdOpt, msgIdOpt)
-        } finally {
-          stmt.close()
+      for {
+        normalizedToken <- validateShareLinkToken(token)
+        target <- db.withConnection { connection =>
+          val stmt = connection.prepareStatement(
+            """
+              |SELECT chapter_id, message_id
+              |FROM share_links
+              |WHERE token = ?
+              |  AND (expires_at IS NULL OR expires_at > NOW())
+              |""".stripMargin
+          )
+          try {
+            stmt.setString(1, normalizedToken)
+            val rs = stmt.executeQuery()
+            if !rs.next() then throw new RuntimeException("Share link not found or expired")
+            val chapterId = rs.getLong("chapter_id")
+            val chapIdOpt = if rs.wasNull() then None else Some(chapterId)
+            val messageId = rs.getLong("message_id")
+            val msgIdOpt = if rs.wasNull() then None else Some(messageId)
+            rs.close()
+            val targetType = if chapIdOpt.isDefined then "chapter" else "message"
+            ShareLinkTarget(targetType, chapIdOpt, msgIdOpt)
+          } finally {
+            stmt.close()
+          }
         }
+      } yield {
+        target
       }
+    }
+
+    private def validateShareLinkToken(token: String): Task[String] = {
+      val normalized = token.trim
+      if shareLinkTokenPattern.matches(normalized) then ZIO.succeed(normalized)
+      else ZIO.fail(new RuntimeException("Share link not found or expired"))
     }
 
     private def parseCursor(cursor: Option[String]): Task[Option[Long]] = {

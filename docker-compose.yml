@@ -4,14 +4,19 @@ services:
     container_name: chat-app-postgres
     environment:
       POSTGRES_DB: chat_app
-      POSTGRES_USER: your_db_user
-      POSTGRES_PASSWORD: your_db_password
+      # Migration / schema-owner user — has DDL rights, used by Flyway.
+      POSTGRES_USER: ${DB_MIGRATION_USER:-chat_app_migration}
+      POSTGRES_PASSWORD: ${DB_MIGRATION_PASSWORD:-change-this-migration-password}
+      # Restricted runtime user — DML only, created by init.sql.
+      DB_APP_USER: ${DB_APP_USER:-chat_app_app}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:-change-this-app-password}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U your_db_user -d chat_app"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_MIGRATION_USER:-chat_app_migration} -d chat_app"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -68,8 +73,8 @@ services:
       - loki
       - tempo
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-this-admin-password}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
@@ -89,8 +94,12 @@ services:
         condition: service_started
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/chat_app
-      DB_USER: your_db_user
-      DB_PASSWORD: your_db_password
+      # Runtime application user — DML only.
+      DB_USER: ${DB_APP_USER:-chat_app_app}
+      DB_PASSWORD: ${DB_APP_PASSWORD:-change-this-app-password}
+      # Migration user — used by Flyway at startup.
+      DB_MIGRATION_USER: ${DB_MIGRATION_USER:-chat_app_migration}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:-change-this-migration-password}
       OTEL_SERVICE_NAME: chat-app-backend
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318

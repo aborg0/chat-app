@@ -18,7 +18,7 @@ object Main extends ZIOAppDefault {
       appConfig <- ZIO.withConfigProvider(AppConfig.provider) {
         ZIO.config(AppConfig.config)
       }
-      _ <- Migrations.migrate(appConfig.db.url, appConfig.db.user, appConfig.db.password)
+      _ <- Migrations.migrate(appConfig.db.url, appConfig.db.effectiveMigrationUser, appConfig.db.effectiveMigrationPassword)
       _ <- Console.printLine(s"Starting backend on http://${appConfig.http.host}:${appConfig.http.port}")
       _ <- Server
         .serve(ApiRoutes.routes)

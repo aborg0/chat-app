@@ -37,6 +37,18 @@ object AuthResponse {
   given JsonDecoder[AuthResponse] = DeriveJsonDecoder.gen[AuthResponse]
 }
 
+final case class OAuthAuthorizeResponse(redirectUri: String, state: String)
+object OAuthAuthorizeResponse {
+  given JsonEncoder[OAuthAuthorizeResponse] = DeriveJsonEncoder.gen[OAuthAuthorizeResponse]
+  given JsonDecoder[OAuthAuthorizeResponse] = DeriveJsonDecoder.gen[OAuthAuthorizeResponse]
+}
+
+final case class OAuthCallbackRequest(provider: String, code: String, state: String, codeVerifier: String, deviceId: String)
+object OAuthCallbackRequest {
+  given JsonEncoder[OAuthCallbackRequest] = DeriveJsonEncoder.gen[OAuthCallbackRequest]
+  given JsonDecoder[OAuthCallbackRequest] = DeriveJsonDecoder.gen[OAuthCallbackRequest]
+}
+
 final case class ActiveSession(sessionToken: String, deviceId: String, createdAtEpochMillis: Long)
 object ActiveSession {
   given JsonEncoder[ActiveSession] = DeriveJsonEncoder.gen[ActiveSession]
