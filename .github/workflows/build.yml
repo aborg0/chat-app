@@ -25,6 +25,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: sbt
+          cache-dependency-path: |
+            **/*.sbt
+            **/project/build.properties
+            **/project/plugins.sbt
 
       - name: Set up sbt
         uses: sbt/setup-sbt@v1

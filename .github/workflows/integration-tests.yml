@@ -18,6 +18,13 @@ jobs:
   backend-integration-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Prefer the canonical Maven Central endpoint over repo1 for better reliability.
+      COURSIER_REPOSITORIES: "https://repo.maven.apache.org/maven2"
+      COURSIER_RETRY_COUNT: "8"
+      COURSIER_PARALLEL_DOWNLOADS: "8"
+      COURSIER_CONNECT_TIMEOUT: "60000"
+      COURSIER_SOCKET_TIMEOUT: "60000"
 
     steps:
       - name: Checkout
@@ -29,10 +36,26 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: sbt
+          cache-dependency-path: |
+            **/*.sbt
+            **/project/build.properties
+            **/project/plugins.sbt
 
       - name: Set up sbt
         uses: sbt/setup-sbt@v1
 
       - name: Run backend integration tests
         run: |
-          sbt "-Dsbt.color=false" "-Dsbt.log.noformat=true" "-Dsbt.supershell=false" "backendIt/test"
+          for attempt in 1 2 3; do
+            echo "Running integration tests (attempt ${attempt}/3)"
+            if sbt "-Dsbt.color=false" "-Dsbt.log.noformat=true" "-Dsbt.supershell=false" "backendIt/test"; then
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "Attempt ${attempt} failed, retrying..."
+            fi
+          done
+
+          echo "Integration tests failed after 3 attempts"
+          exit 1
